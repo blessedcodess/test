@@ -190,6 +190,15 @@ A 4-core CPU takes longer. After that iOS starts in seconds with quick boot.
 | Close the window | Saves iOS as it is and quits; the next start resumes it |
 | *Shut down* | Turns iOS off cleanly (about 10 s); pressed again, quits at once |
 
+### View and control iOS from Android
+
+`Start-iOS-Remote.cmd` keeps QEMU running on this Windows PC, shows its usual window, and also opens
+a password-protected VNC display on the PC's private IPv4 network address. On Android, use a VNC
+client and connect to the address and temporary password printed in the Windows window. Touches are
+sent to iOS through the virtual tablet device. Keep the connection on a trusted private Wi-Fi/LAN;
+do not forward port 5900 to the internet. The existing *Send to phone* feature transfers the VM to
+Android to run there; this remote mode leaves emulation on the PC.
+
 ## Disk space
 
 | | While installing | Installed |

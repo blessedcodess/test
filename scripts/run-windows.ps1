@@ -38,6 +38,8 @@ param(
     # sidebar=on (0006): Home, Lock, Volume, Screenshot, Install .ipa, Shut down beside the screen.
     # show-menubar=off: the side bar has what QEMU's menus offered here (Ctrl+Alt+M shows them)
     [string]$Display = 'gtk,gl=on,show-cursor=on,window-close=off,sidebar=on,show-menubar=off',
+    # -Remote: serve the live display to a VNC client on a trusted private network; the guest stays on this PC.
+    [switch]$Remote,
     # keepon: no auto-lock blackout. Keys in the window: F1 Home, F2 side button, F3/F4 volume, every
     # other key a hardware keyboard (kernel 0096+); mouse = touch
     [string]$ExtraArgs = 'sweetfb_noconsole=1 sweetfb_keepon=1',
@@ -82,6 +84,32 @@ function Invoke-Tool {
     $ErrorActionPreference = 'Continue'
     $rest = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
     & $args[0] @rest
+}
+function New-RemotePassword {
+    $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+    $bytes = New-Object byte[] 8
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    -join ($bytes | ForEach-Object { $alphabet[([int]$_ % $alphabet.Length)] })
+}
+function Get-RemoteAddress {
+    $routes = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+        Sort-Object RouteMetric
+    foreach ($route in $routes) {
+        $addresses = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue |
+            Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notmatch '^(127\.|169\.254\.)' }
+        foreach ($address in $addresses) {
+            $ip = $address.IPAddress
+            if ($ip -match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)') { return $ip }
+        }
+    }
+    throw 'Remote mode needs a private IPv4 address on Wi-Fi or Ethernet. Connect this PC to the same private network as the Android phone.'
+}
+if ($Remote) {
+    $RemoteAddress = Get-RemoteAddress
+    $RemotePassword = New-RemotePassword
+    $RemoteVnc = "${RemoteAddress}:0,password=on"
+    $env:ASOFT_VNC_PASSWORD = $RemotePassword
 }
 New-Item -ItemType Directory -Force $TmpDir | Out-Null
 $env:TMP = $env:TEMP = $TmpDir
@@ -259,6 +287,12 @@ try {
     $qemuArgs = @("$out\payload.bin", "$out\run", '--disk', $Disk, '--smp', $Cpus,
         '--display', $Display, '--qemu-log', 'guest_errors,unimp', '--qmp-tcp', $QmpPort,
         '--name', 'ASoftware iOS')
+    if ($Remote) {
+        $qemuArgs += @('--vnc', $RemoteVnc, '--set-vnc-password')
+        Write-Host "Connect an Android VNC client to ${RemoteAddress}:5900 (same private Wi-Fi/LAN)."
+        Write-Host "VNC password (shown once): $RemotePassword"
+        Write-Host 'Allow the connection in Windows Firewall only on a private network, if prompted.'
+    }
     if (-not $Keep) { $qemuArgs += '--snapshot' }
     if ($NoNet) { $qemuArgs += '--net', 'none' }
     # From here on the disk goes on from this start: a quick save, resumed now or not, is the way back
@@ -287,6 +321,7 @@ try {
     }
 } finally {
     if ($ipaServer -and -not $ipaServer.HasExited) { Stop-Process -Id $ipaServer.Id -Force }
+    if ($Remote) { Remove-Item Env:ASOFT_VNC_PASSWORD -ErrorAction SilentlyContinue }
     Pop-Location
 }
 Write-Host "Kernel log: $out\run\serial.txt"

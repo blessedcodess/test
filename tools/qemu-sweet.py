@@ -200,6 +200,39 @@ def qmp(sock_path, *cmds, pmemsave=None):
     return out
 
 
+def set_vnc_password(port, password):
+    """Set the VNC password over the loopback-only QMP socket before accepting clients."""
+    deadline = time.monotonic() + 30
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
+                s.settimeout(3)
+                f = s.makefile('rw')
+                f.readline()  # QMP greeting
+
+                def call(execute, **arguments):
+                    f.write(json.dumps({'execute': execute, 'arguments': arguments}) + '\n')
+                    f.flush()
+                    while True:
+                        reply = json.loads(f.readline())
+                        if 'error' in reply:
+                            raise RuntimeError(reply['error'].get('desc', 'QMP command failed'))
+                        if 'return' in reply:
+                            return reply['return']
+
+                call('qmp_capabilities')
+                call('set_password', protocol='vnc', password=password)
+                return
+        except (OSError, ValueError, RuntimeError) as e:
+            last_error = e
+            # A refused connection during QEMU's early initialization is expected.
+            if isinstance(e, RuntimeError):
+                raise
+            time.sleep(0.2)
+    raise RuntimeError(f'could not set the VNC password through QMP: {last_error}')
+
+
 def stream_serial_file(serial_path, file_pos, out_stream=sys.stdout):
     """Read newly appended content from serial.txt and write directly to stream."""
     if not os.path.exists(serial_path):
@@ -250,6 +283,10 @@ def main():
                          "guest 10.0.2.15, DNS 10.0.2.3); 'none': no network")
     ap.add_argument('--qmp-tcp', type=int, metavar='PORT',
                     help='with --display: QMP on 127.0.0.1:PORT (e.g. for screendump)')
+    ap.add_argument('--vnc', metavar='DISPLAY[,OPTION...]',
+                    help='add a VNC server alongside the selected local display, e.g. 192.168.1.2:0,password=on')
+    ap.add_argument('--set-vnc-password', action='store_true',
+                    help='set ASOFT_VNC_PASSWORD through QMP before accepting VNC clients')
     ap.add_argument('--name', help='QEMU -name: the window title ("QEMU (NAME)"; just NAME with our QEMU, 0004)')
     ap.add_argument('--loadvm', metavar='SNAPSHOT',
                     help="with a qcow2 --disk: resume the machine state saved in it (QEMU -loadvm), "
@@ -271,6 +308,9 @@ def main():
 
     if a.fail_on_panic and not a.kernel:
         ap.error('--fail-on-panic requires --kernel')
+
+    if a.set_vnc_password and (not a.qmp_tcp or not a.vnc or not os.environ.get('ASOFT_VNC_PASSWORD')):
+        ap.error('--set-vnc-password needs --qmp-tcp, --vnc and ASOFT_VNC_PASSWORD')
 
     if not check_qemu_dependency(a.cpu):
         return 1
@@ -347,6 +387,8 @@ def main():
         cmd += ['-loadvm', a.loadvm]
     if a.gdb:
         cmd += ['-S', '-gdb', 'tcp::1234']
+    if a.vnc:
+        cmd += ['-vnc', a.vnc]
 
     p = None
     serial_file = f'{out}/serial.txt'
@@ -354,6 +396,18 @@ def main():
 
     try:
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        if a.set_vnc_password:
+            try:
+                set_vnc_password(a.qmp_tcp, os.environ['ASOFT_VNC_PASSWORD'])
+            except Exception as e:
+                print(f'[!] {e}; stopping QEMU without opening remote access', file=sys.stderr)
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+                return 1
         if a.gdb:
             print('gdb stub on :1234; QMP socket:', mon, file=sys.stderr)
             p.wait()
